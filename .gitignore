@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Generated files
+*.log
