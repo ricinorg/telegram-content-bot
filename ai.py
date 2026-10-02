@@ -5,7 +5,7 @@ import re
 
 class AIServiceError(RuntimeError):
     """Safe, user-facing error with a stage name."""
-
+ 
 
 class AIService:
     def __init__(self, key, text_model):
