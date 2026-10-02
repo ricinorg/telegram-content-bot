@@ -9,12 +9,24 @@ class AIServiceError(RuntimeError):
 
 class AIService:
     def __init__(self, key, text_model):
-        self.client = OpenAI(api_key=key)
+        self.client = OpenAI(
+            api_key=key,
+            base_url="https://api.gapgpt.app/v1"
+        )
         self.text_model = text_model
 
     def _call(self, prompt):
-        r = self.client.responses.create(model=self.text_model, input=prompt)
-        text = (r.output_text or "").strip()
+        r = self.client.chat.completions.create(
+            model=self.text_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+        )
+        text = (r.choices[0].message.content or "").strip()
+
         if not text:
             raise RuntimeError("OpenAI پاسخ متنی خالی برگرداند.")
         return text
