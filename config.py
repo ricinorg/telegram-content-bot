@@ -40,7 +40,7 @@ def load_settings() -> Settings:
         telegram_bot_token=required["TELEGRAM_BOT_TOKEN"],
         telegram_channel_id=required["TELEGRAM_CHANNEL_ID"],
         openai_api_key=required["OPENAI_API_KEY"],
-        openai_text_model=os.getenv("OPENAI_TEXT_MODEL", "gpt-5.6-luna"),
+        openai_text_model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
         admin_user_ids=_csv_ints(os.getenv("ADMIN_USER_IDS")),
         timezone=os.getenv("TIMEZONE", "UTC"),
         database_path=os.getenv("DATABASE_PATH", "data/bot.db"),
