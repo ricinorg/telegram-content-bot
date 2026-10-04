@@ -3,3 +3,4 @@ python-dotenv>=1,<2
 openai>=1.0,<3
 Pillow>=10,<12
 pytest>=8,<9
+google-genai>=1,<2
