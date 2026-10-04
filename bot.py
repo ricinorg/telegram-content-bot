@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 settings = load_settings()
 db = Database(settings.database_path)
 db.reset_processing()
-ai = AIService(settings.openai_api_key, settings.openai_text_model)
+ai = AIService()
+
 JOB_NAME = "hourly_topic_publisher"
 
 
