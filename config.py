@@ -54,7 +54,7 @@ def load_settings() -> Settings:
         gemini_api_key=required["GEMINI_API_KEY"],
         gemini_model=os.getenv(
             "GEMINI_MODEL",
-            "gemini-2.5-flash",
+            "gemini-3.6-flash",
         ),
         admin_user_ids=_csv_ints(
             os.getenv("ADMIN_USER_IDS")
