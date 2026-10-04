@@ -1,5 +1,6 @@
 import os
 import re
+import time
 
 from google import genai
 
@@ -13,7 +14,7 @@ class AIService:
         self.api_key = key or os.getenv("GEMINI_API_KEY", "")
         self.text_model = (
             text_model
-            or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+            or os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
         )
 
         if not self.api_key:
@@ -26,18 +27,12 @@ class AIService:
         )
 
     def _call(self, prompt):
-    models = [
-        self.text_model,
-        "gemini-3.1-flash",
-    ]
+        last_error = None
 
-    last_error = None
-
-    for model in models:
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = self.client.models.generate_content(
-                    model=model,
+                    model=self.text_model,
                     contents=prompt,
                 )
 
@@ -52,28 +47,32 @@ class AIService:
 
             except Exception as exc:
                 last_error = exc
-
                 error_text = str(exc)
 
-                if "503" in error_text or "UNAVAILABLE" in error_text:
-                    import time
-                    time.sleep(3)
-                    continue
+                # Gemini temporarily unavailable
+                if (
+                    "503" in error_text
+                    or "UNAVAILABLE" in error_text
+                ):
+                    if attempt < 2:
+                        time.sleep(5 * (attempt + 1))
+                        continue
 
-                if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
-                    import time
-                    time.sleep(5)
-                    continue
+                # Rate limit / quota
+                if (
+                    "429" in error_text
+                    or "RESOURCE_EXHAUSTED" in error_text
+                ):
+                    if attempt < 2:
+                        time.sleep(10 * (attempt + 1))
+                        continue
 
                 break
 
-    raise RuntimeError(
-        f"Gemini API | مدل: {self.text_model} | "
-        f"{type(last_error).__name__}: {last_error}"
-    ) from last_error(
-                f"Gemini API | مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        raise RuntimeError(
+            f"Gemini API | مدل: {self.text_model} | "
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
 
     def test_connection(self):
         """تست اتصال به Gemini برای پنل مدیریت."""
@@ -81,7 +80,11 @@ class AIService:
             "فقط کلمه OK را پاسخ بده."
         )
 
-    def generate_text(self, topic, previous_text=None):
+    def generate_text(
+        self,
+        topic,
+        previous_text=None,
+    ):
         context = ""
 
         if previous_text:
@@ -125,7 +128,12 @@ class AIService:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
-    def extract_topics(self, topic, text, count=6):
+    def extract_topics(
+        self,
+        topic,
+        text,
+        count=6,
+    ):
         prompt = f"""از پست فارسی زیر، {count} موضوع فرعی مشخص و
 قابل تبدیل به یک پست مستقل استخراج کن.
 
@@ -158,7 +166,7 @@ class AIService:
                 line = re.sub(
                     r"^[\s\-\*\d\.\)\:]+",
                     "",
-                    line
+                    line,
                 ).strip()
 
                 if (
