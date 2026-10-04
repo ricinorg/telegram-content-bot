@@ -26,23 +26,51 @@ class AIService:
         )
 
     def _call(self, prompt):
-        try:
-            response = self.client.models.generate_content(
-                model=self.text_model,
-                contents=prompt,
-            )
+    models = [
+        self.text_model,
+        "gemini-3.1-flash",
+    ]
 
-            text = (response.text or "").strip()
+    last_error = None
 
-            if not text:
-                raise RuntimeError(
-                    "Gemini پاسخ متنی خالی برگرداند."
+    for model in models:
+        for attempt in range(2):
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt,
                 )
 
-            return text
+                text = (response.text or "").strip()
 
-        except Exception as exc:
-            raise RuntimeError(
+                if not text:
+                    raise RuntimeError(
+                        "Gemini پاسخ متنی خالی برگرداند."
+                    )
+
+                return text
+
+            except Exception as exc:
+                last_error = exc
+
+                error_text = str(exc)
+
+                if "503" in error_text or "UNAVAILABLE" in error_text:
+                    import time
+                    time.sleep(3)
+                    continue
+
+                if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+                    import time
+                    time.sleep(5)
+                    continue
+
+                break
+
+    raise RuntimeError(
+        f"Gemini API | مدل: {self.text_model} | "
+        f"{type(last_error).__name__}: {last_error}"
+    ) from last_error(
                 f"Gemini API | مدل: {self.text_model} | "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
