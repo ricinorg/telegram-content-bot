@@ -10,9 +10,8 @@ class AIServiceError(RuntimeError):
 class AIService:
     def __init__(self, key, text_model):
         self.client = OpenAI(
-            api_key=key,
-            base_url="https://api.gapgpt.app/v1"
-        )
+    api_key=key
+)
         self.text_model = text_model
 
     def _call(self, prompt):
