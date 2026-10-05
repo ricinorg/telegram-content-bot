@@ -8,15 +8,10 @@ from google.genai import types
 
 
 class AIServiceError(RuntimeError):
-    """خطای اختصاصی سرویس هوش مصنوعی."""
-    pass
+    """Custom error for AI service."""
 
 
 class AIService:
-    """
-    سرویس ارتباط با Google Gemini برای تولید و پردازش محتوا.
-    """
-
     DEFAULT_MODEL = "gemini-3.6-flash"
     DEFAULT_MAX_RETRIES = 3
 
@@ -24,11 +19,10 @@ class AIService:
         self,
         key: Optional[str] = None,
         text_model: Optional[str] = None,
-        max_retries: int = DEFAULT_MAX_RETRIES,
+        max_retries: int = 3,
     ):
         self.api_key = (
-            key
-            or os.getenv("GEMINI_API_KEY", "")
+            key or os.getenv("GEMINI_API_KEY", "")
         ).strip()
 
         self.text_model = (
@@ -39,10 +33,7 @@ class AIService:
             )
         ).strip()
 
-        self.max_retries = max(
-            1,
-            int(max_retries),
-        )
+        self.max_retries = max(1, int(max_retries))
 
         if not self.api_key:
             raise AIServiceError(
@@ -55,23 +46,21 @@ class AIService:
             )
         except Exception as exc:
             raise AIServiceError(
-                "ساخت Gemini Client ناموفق بود: "
-                f"{type(exc).__name__}: {exc}"
+                f"ساخت Gemini Client ناموفق بود: {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
-    # Internal helpers
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Helpers
+    # --------------------------------------------------
 
     @staticmethod
     def _clean_text(text: Optional[str]) -> str:
-        """پاک‌سازی ساده خروجی مدل."""
         if not text:
             return ""
 
         text = str(text).strip()
 
-        # حذف code fence در صورتی که مدل اشتباهی اضافه کرده باشد
+        # Remove accidental markdown code fences
         text = re.sub(
             r"^```(?:text|markdown)?\s*",
             "",
@@ -89,15 +78,11 @@ class AIService:
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
-        """
-        تشخیص خطاهایی که ارزش retry کردن دارند.
-        """
-
         error_text = (
             f"{type(exc).__name__}: {exc}"
         ).upper()
 
-        retryable_patterns = (
+        retryable_errors = (
             "429",
             "RESOURCE_EXHAUSTED",
             "RATE_LIMIT",
@@ -111,8 +96,8 @@ class AIService:
         )
 
         return any(
-            pattern in error_text
-            for pattern in retryable_patterns
+            item in error_text
+            for item in retryable_errors
         )
 
     @staticmethod
@@ -120,42 +105,30 @@ class AIService:
         attempt: int,
         exc: Exception,
     ) -> int:
-        """
-        محاسبه زمان انتظار قبل از retry.
-        """
-
         error_text = str(exc).upper()
 
-        # Rate limit معمولاً به زمان بیشتری نیاز دارد.
         if (
             "429" in error_text
             or "RESOURCE_EXHAUSTED" in error_text
             or "RATE_LIMIT" in error_text
         ):
-            return min(
-                30,
-                5 * (2 ** attempt),
-            )
+            return min(30, 5 * (2 ** attempt))
 
-        # خطاهای موقت سرور
-        return min(
-            20,
-            2 * (2 ** attempt),
-        )
+        return min(20, 2 * (2 ** attempt))
+
+    # --------------------------------------------------
+    # Gemini API
+    # --------------------------------------------------
 
     def _call(
         self,
         prompt: str,
-        *,
         temperature: float = 0.8,
         max_output_tokens: int = 4096,
     ) -> str:
-        """
-        ارسال درخواست به Gemini با retry.
-        """
 
         if not prompt or not prompt.strip():
-            raise ValueError(
+            raise AIServiceError(
                 "Prompt نمی‌تواند خالی باشد."
             )
 
@@ -189,8 +162,7 @@ class AIService:
                 last_error = exc
 
                 is_last_attempt = (
-                    attempt
-                    >= self.max_retries - 1
+                    attempt >= self.max_retries - 1
                 )
 
                 if (
@@ -207,28 +179,26 @@ class AIService:
                 time.sleep(delay)
 
         raise AIServiceError(
-            f"Gemini API خطا داد | "
+            "Gemini API خطا داد | "
             f"مدل: {self.text_model} | "
             f"{type(last_error).__name__}: "
             f"{last_error}"
         ) from last_error
 
-    # ---------------------------------------------------------
-    # Connection
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Test connection
+    # --------------------------------------------------
 
     def test_connection(self) -> str:
-        """تست اتصال به Gemini."""
-
         return self._call(
             "فقط کلمه OK را پاسخ بده.",
             temperature=0,
             max_output_tokens=10,
         )
 
-    # ---------------------------------------------------------
-    # Generate post
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Generate text
+    # --------------------------------------------------
 
     def generate_text(
         self,
@@ -237,7 +207,6 @@ class AIService:
         research: Optional[str] = None,
         style_instruction: Optional[str] = None,
     ) -> str:
-        """تولید پست فارسی برای کانال."""
 
         if not topic or not topic.strip():
             raise AIServiceError(
@@ -248,47 +217,52 @@ class AIService:
 
         if previous_text:
             context_parts.append(
-                f"""
-این پست قبلی است.
-پست جدید نباید تکرار، کپی یا بازنویسی سطحی آن باشد:
+                """
+پست قبلی:
 
 ---
-{previous_text.strip()}
+%s
 ---
+
+پست جدید نباید تکرار، کپی یا بازنویسی سطحی آن باشد.
 """
+                % previous_text.strip()
             )
 
         if research:
             context_parts.append(
-                f"""
-اطلاعات تحقیقاتی زیر را در نظر بگیر.
-فقط از اطلاعات قابل اتکا استفاده کن:
+                """
+اطلاعات تحقیقاتی:
 
 ---
-{research.strip()}
+%s
 ---
+
+فقط از اطلاعات قابل اتکا استفاده کن.
 """
+                % research.strip()
             )
 
         if style_instruction:
             context_parts.append(
-                f"""
-دستور سبک اضافی:
+                """
+دستور سبک:
 
-{style_instruction.strip()}
+%s
 """
+                % style_instruction.strip()
             )
 
         context = "\n".join(context_parts)
 
-        prompt = f"""
+        prompt = """
 برای کانال تلگرامی فارسی @nova_ip
 درباره موضوع زیر یک پست حرفه‌ای، جذاب و خلاقانه بنویس.
 
 موضوع:
-{topic.strip()}
+%s
 
-{context}
+%s
 
 قوانین:
 
@@ -304,9 +278,12 @@ class AIService:
 - اطلاعات ساختگی تولید نکن.
 - اگر اطلاعات کافی نیست، ادعای قطعی نساز.
 - در پایان 5 تا 10 هشتگ مرتبط قرار بده.
-- از عنوان‌های کلیشه‌ای و بیش‌ازحد تبلیغاتی پرهیز کن.
+- از عنوان‌های کلیشه‌ای و بیش از حد تبلیغاتی پرهیز کن.
 - فقط متن نهایی پست را برگردان.
-"""
+""" % (
+            topic.strip(),
+            context,
+        )
 
         try:
             return self._call(
@@ -316,24 +293,13 @@ class AIService:
             )
 
         except Exception as exc:
-            if isinstance(
-                exc,
-                AIServiceError,
-            ):
-                raise AIServiceError(
-                    "TEXT_GENERATION | "
-                    f"{exc}"
-                ) from exc
-
             raise AIServiceError(
-                "TEXT_GENERATION | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"TEXT_GENERATION | {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
+    # --------------------------------------------------
     # Regenerate
-    # ---------------------------------------------------------
+    # --------------------------------------------------
 
     def regenerate(
         self,
@@ -342,7 +308,6 @@ class AIService:
         instruction: Optional[str] = None,
         previous_text: Optional[str] = None,
     ) -> str:
-        """بازنویسی کامل یک پست."""
 
         if not old_text or not old_text.strip():
             raise AIServiceError(
@@ -359,35 +324,35 @@ class AIService:
         previous_context = ""
 
         if previous_text:
-            previous_context = f"""
-برای جلوگیری از تکرار، این پست قبلی را نیز در نظر بگیر:
+            previous_context = """
+پست قبلی برای جلوگیری از تکرار:
 
 ---
-{previous_text.strip()}
+%s
 ---
-"""
+""" % previous_text.strip()
 
-        prompt = f"""
+        prompt = """
 این پست را برای کانال @nova_ip بازنویسی کن.
 
 موضوع:
-{topic.strip()}
+%s
 
 پست فعلی:
 ---
-{old_text.strip()}
+%s
 ---
 
 دستور بازتولید:
-{instruction}
+%s
 
-{previous_context}
+%s
 
 قوانین:
 
 - مفهوم اصلی حفظ شود.
-- متن جدید کپی یا بازنویسی سطحی متن قبلی نباشد.
-- ساختار و جمله‌بندی را تا حد زیادی تغییر بده.
+- متن جدید کپی یا بازنویسی سطحی نباشد.
+- ساختار و جمله‌بندی را تغییر بده.
 - فارسی روان و انسانی باشد.
 - شروع جذاب داشته باشد.
 - مفید و خوانا باشد.
@@ -396,7 +361,12 @@ class AIService:
 - 5 تا 10 هشتگ مرتبط در پایان داشته باشد.
 - اطلاعات ساختگی اضافه نکن.
 - فقط متن نهایی را برگردان.
-"""
+""" % (
+            topic.strip(),
+            old_text.strip(),
+            instruction,
+            previous_context,
+        )
 
         try:
             return self._call(
@@ -407,14 +377,12 @@ class AIService:
 
         except Exception as exc:
             raise AIServiceError(
-                "REGENERATE | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"REGENERATE | {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
-    # Edit
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Edit text
+    # --------------------------------------------------
 
     def edit_text(
         self,
@@ -422,7 +390,6 @@ class AIService:
         old_text: str,
         instruction: str,
     ) -> str:
-        """ویرایش یک پست طبق دستور ادمین."""
 
         if not old_text or not old_text.strip():
             raise AIServiceError(
@@ -434,19 +401,19 @@ class AIService:
                 "دستور ویرایش نمی‌تواند خالی باشد."
             )
 
-        prompt = f"""
+        prompt = """
 پست زیر را ویرایش کن.
 
 موضوع:
-{topic.strip()}
+%s
 
 متن:
 ---
-{old_text.strip()}
+%s
 ---
 
 دستور ادمین:
-{instruction.strip()}
+%s
 
 قوانین:
 
@@ -454,9 +421,12 @@ class AIService:
 - دستور ادمین دقیقاً اعمال شود.
 - فارسی روان و طبیعی باشد.
 - اطلاعات جدید و ساختگی اضافه نکن.
-- ساختار متن را فقط در صورت نیاز تغییر بده.
 - فقط نسخه نهایی ویرایش‌شده را برگردان.
-"""
+""" % (
+            topic.strip(),
+            old_text.strip(),
+            instruction.strip(),
+        )
 
         try:
             return self._call(
@@ -467,14 +437,12 @@ class AIService:
 
         except Exception as exc:
             raise AIServiceError(
-                "EDIT | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"EDIT | {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
-    # Topic extraction
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Extract topics
+    # --------------------------------------------------
 
     def extract_topics(
         self,
@@ -482,7 +450,6 @@ class AIService:
         text: str,
         count: int = 6,
     ) -> list[str]:
-        """استخراج موضوعات فرعی از یک پست."""
 
         count = max(
             4,
@@ -494,16 +461,16 @@ class AIService:
                 "متن برای استخراج موضوع خالی است."
             )
 
-        prompt = f"""
-از پست فارسی زیر {count} موضوع فرعی قابل تبدیل
+        prompt = """
+از پست فارسی زیر %d موضوع فرعی قابل تبدیل
 به پست مستقل استخراج کن.
 
 موضوع فعلی:
-{topic.strip()}
+%s
 
 پست:
 ---
-{text.strip()}
+%s
 ---
 
 قوانین:
@@ -513,12 +480,17 @@ class AIService:
 - تکراری نباشند.
 - خود موضوع فعلی نباشند.
 - هر خط فقط یک موضوع باشد.
-- بین 4 تا {count} موضوع بده.
+- بین 4 تا %d موضوع بده.
 - شماره‌گذاری نکن.
 - توضیح اضافه نده.
 
 فقط موضوع‌ها را خط‌به‌خط برگردان.
-"""
+""" % (
+            count,
+            topic.strip(),
+            text.strip(),
+            count,
+        )
 
         try:
             raw = self._call(
@@ -535,31 +507,21 @@ class AIService:
                 if not line:
                     continue
 
-                # حذف شماره‌گذاری و bullet
                 line = re.sub(
                     r"^(?:[-*•]|\d+[\.\)\-:])\s*",
                     "",
                     line,
                 ).strip()
 
-                # حذف Markdown
-                line = line.strip(
-                    "`*_# "
-                )
+                line = line.strip("`*_# ")
 
-                if not (
-                    4
-                    <= len(line)
-                    <= 180
-                ):
+                if not (4 <= len(line) <= 180):
                     continue
 
-                # جلوگیری از تکرار بدون حساسیت به حروف
                 normalized = line.casefold()
 
                 if not any(
-                    normalized
-                    == item.casefold()
+                    normalized == item.casefold()
                     for item in items
                 ):
                     items.append(line)
@@ -573,31 +535,28 @@ class AIService:
 
         except Exception as exc:
             raise AIServiceError(
-                "TOPIC_EXTRACTION | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"TOPIC_EXTRACTION | {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
-    # Image prompt
-    # ---------------------------------------------------------
+    # --------------------------------------------------
+    # Create image prompt
+    # --------------------------------------------------
 
     def create_image_prompt(
         self,
         topic: str,
         text: str,
     ) -> str:
-        """تولید prompt انگلیسی برای تصویر."""
 
-        prompt = f"""
+        prompt = """
 Create a short, high-quality English prompt
 for generating a social-media image.
 
 Topic:
-{topic.strip()}
+%s
 
 Post:
-{text.strip()}
+%s
 
 The image must be:
 
@@ -612,7 +571,10 @@ The image must be:
 - clean composition
 
 Return only the English image-generation prompt.
-"""
+""" % (
+            topic.strip(),
+            text.strip(),
+        )
 
         try:
             return self._call(
@@ -623,37 +585,34 @@ Return only the English image-generation prompt.
 
         except Exception as exc:
             raise AIServiceError(
-                "IMAGE_PROMPT | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"IMAGE_PROMPT | {exc}"
             ) from exc
 
-    # ---------------------------------------------------------
+    # --------------------------------------------------
     # Research summary
-    # ---------------------------------------------------------
+    # --------------------------------------------------
 
     def research_summary(
         self,
         topic: str,
         sources_text: str,
     ) -> str:
-        """خلاصه‌سازی منابع تحقیقاتی."""
 
         if not sources_text or not sources_text.strip():
             raise AIServiceError(
                 "متن منابع تحقیقاتی خالی است."
             )
 
-        prompt = f"""
+        prompt = """
 بر اساس منابع زیر یک خلاصه دقیق
 برای نویسنده محتوا بساز.
 
 موضوع:
-{topic.strip()}
+%s
 
 منابع:
 ---
-{sources_text.strip()}
+%s
 ---
 
 قوانین:
@@ -663,12 +622,15 @@ Return only the English image-generation prompt.
 - نکات مهم را استخراج کن.
 - تناقض‌ها را مشخص کن.
 - موارد نامطمئن را جدا کن.
-- اطلاعات را به شکل منظم و قابل استفاده ارائه بده.
+- اطلاعات را منظم و قابل استفاده ارائه بده.
 - خروجی برای استفاده در تولید پست باشد.
 - اگر منابع برای یک ادعا کافی نیستند، آن را قطعی بیان نکن.
 
 فقط خلاصه تحقیق را برگردان.
-"""
+""" % (
+            topic.strip(),
+            sources_text.strip(),
+        )
 
         try:
             return self._call(
@@ -679,41 +641,5 @@ Return only the English image-generation prompt.
 
         except Exception as exc:
             raise AIServiceError(
-                "RESEARCH_SUMMARY | "
-                f"مدل: {self.text_model} | "
-                f"{type(exc).__name__}: {exc}"
+                f"RESEARCH_SUMMARY | {exc}"
             ) from exc
-
-برای نصب/آپدیت SDK هم از پکیج رسمی "google-genai" استفاده کن:
-
-pip install -U google-genai
-
-و متغیر محیطی را تنظیم کن:
-
-export GEMINI_API_KEY="YOUR_API_KEY"
-
-در ویندوز:
-
-$env:GEMINI_API_KEY="YOUR_API_KEY"
-
-یا می‌توانی مدل را تغییر بدهی:
-
-GEMINI_MODEL=gemini-3.6-flash
-
-API رسمی Google همین الگوی "genai.Client()" و "client.models.generate_content()" را برای Python نشان می‌دهد.
-
-تغییرات مهمی که انجام دادم:
-
-- تمام خطاهای Syntax و indentation برطرف شد.
-- """""های خراب و Markdownهای واردشده داخل کد حذف شدند.
-- retry به‌صورت عمومی‌تر برای "429"، "503"، timeout و خطاهای موقت انجام می‌شود.
-- زمان retry به‌صورت exponential backoff تنظیم شده.
-- "temperature" و "max_output_tokens" قابل کنترل هستند.
-- ورودی‌های خالی کنترل می‌شوند.
-- خروجی مدل پاک‌سازی می‌شود.
-- استخراج Topic مقاوم‌تر شده و موارد تکراری حذف می‌شوند.
-- خطاها با "AIServiceError" به شکل منظم‌تر مدیریت می‌شوند.
-- "previous_text" در "regenerate" واقعاً استفاده می‌شود.
-- promptها کوتاه‌تر و منظم‌تر شده‌اند.
-
-اگر این کلاس را داخل یک ربات تلگرام استفاده می‌کنی، کد اصلی رباتت را هم بفرست؛ می‌توانم کل بخش Gemini + تولید پست + تحقیق + تولید تصویر + ذخیره تاریخچه + retry + Telegram را یکپارچه و production-ready کنم.
