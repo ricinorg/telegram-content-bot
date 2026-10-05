@@ -63,6 +63,18 @@ def _init(self):
 
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS content_feedback(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                note TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        c.execute(
+            """
             INSERT OR IGNORE INTO automation(
                 id,
                 active,
@@ -120,15 +132,17 @@ def create_post(
                 prompt,
                 text,
                 image_path,
+                status,
                 scheduled_at,
                 created_at
             )
-            VALUES(?,?,?,?,?)
+            VALUES(?,?,?,?,?,?)
             """,
             (
                 prompt,
                 text,
                 image_path,
+                "draft",
                 scheduled_at,
                 now_iso(),
             ),
@@ -155,6 +169,27 @@ def get_post(self, post_id):
             (post_id,),
         ).fetchone()
 
+def get_posts_by_status(self, status, limit=20):
+    with self._connect() as c:
+        return c.execute(
+            """
+            SELECT
+                id,
+                prompt,
+                text,
+                image_path,
+                status,
+                scheduled_at,
+                created_at,
+                published_at
+            FROM posts
+            WHERE status=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (status, int(limit)),
+        ).fetchall()
+
 def update_post(self, post_id, status):
     published_at = (
         now_iso()
@@ -178,6 +213,21 @@ def update_post(self, post_id, status):
         )
         c.commit()
 
+def update_post_text(self, post_id, text):
+    with self._connect() as c:
+        c.execute(
+            """
+            UPDATE posts
+            SET text=?
+            WHERE id=?
+            """,
+            (
+                text,
+                post_id,
+            ),
+        )
+        c.commit()
+
 def get_last_post_text(self):
     with self._connect() as c:
         row = c.execute(
@@ -191,6 +241,27 @@ def get_last_post_text(self):
         ).fetchone()
 
         return row[0] if row else None
+
+def add_feedback(self, post_id, action, note=None):
+    with self._connect() as c:
+        c.execute(
+            """
+            INSERT INTO content_feedback(
+                post_id,
+                action,
+                note,
+                created_at
+            )
+            VALUES(?,?,?,?)
+            """,
+            (
+                post_id,
+                action,
+                note,
+                now_iso(),
+            ),
+        )
+        c.commit()
 
 def add_topic(
     self,
@@ -565,6 +636,14 @@ def stats(self):
             """
         ).fetchone()[0]
 
+        processing = c.execute(
+            """
+            SELECT COUNT(*)
+            FROM topic_nodes
+            WHERE status='processing'
+            """
+        ).fetchone()[0]
+
         used = c.execute(
             """
             SELECT COUNT(*)
@@ -581,4 +660,18 @@ def stats(self):
             """
         ).fetchone()[0]
 
-        return posts, pending, used
+        drafts = c.execute(
+            """
+            SELECT COUNT(*)
+            FROM posts
+            WHERE status='draft'
+            """
+        ).fetchone()[0]
+
+        return (
+            posts,
+            pending,
+            used,
+            processing,
+            drafts,
+        )
