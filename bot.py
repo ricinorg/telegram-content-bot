@@ -942,6 +942,58 @@ def main():
 
     if not settings.admin_user_ids:
         logger.warning(
-    "ADMIN_USER_IDS is empty. "
-    "No Telegram user will have admin access."
+            "ADMIN_USER_IDS is empty. "
+            "No Telegram user will have admin access."
         )
+
+    application = build_application()
+
+    external_url = os.getenv(
+        "RENDER_EXTERNAL_URL",
+        "",
+    ).rstrip("/")
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000",
+        )
+    )
+
+    if external_url:
+        webhook_url = (
+            f"{external_url}/telegram"
+        )
+
+        logger.info(
+            "Starting webhook on port %s",
+            port,
+        )
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="telegram",
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+
+    else:
+        logger.info(
+            "RENDER_EXTERNAL_URL not found."
+        )
+
+        logger.info(
+            "Starting Telegram polling..."
+        )
+
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+
+
+if __name__ == "__main__":
+    print("=== CALLING MAIN ===", flush=True)
+    main()
