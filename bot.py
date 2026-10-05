@@ -1,5 +1,6 @@
 import logging
 import os
+print("=== BOT.PY STARTED ===", flush=True)
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
