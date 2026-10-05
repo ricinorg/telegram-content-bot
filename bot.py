@@ -941,4 +941,6 @@ def main():
 
     if not settings.admin_user_ids:
         logger.warning(
-            "ADMIN_USER_IDS is emp
+    "ADMIN_USER_IDS is empty. "
+    "No Telegram user will have admin access."
+        )
