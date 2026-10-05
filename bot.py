@@ -1,9 +1,32 @@
+# ============================================================
+# bot.py
+# فایل اصلی اجرای ربات تلگرام
+#
+# وظایف:
+# 1. اجرای ربات Telegram
+# 2. اتصال Gemini
+# 3. تولید و انتشار پست
+# 4. ساخت زنجیره موضوعات فرعی
+# 5. مدیریت اتوماسیون انتشار
+# 6. مدیریت Scheduler
+# 7. اتصال پنل مدیریت
+# ============================================================
+
+
+# ============================================================
+# بخش 1 — کتابخانه‌ها
+# ============================================================
+
 import logging
 import os
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
 from ai import AIService
 from config import load_settings
@@ -11,35 +34,94 @@ from db import Database
 from admin_panel import register_admin_handlers
 
 
+# ============================================================
+# بخش 2 — تنظیمات Logging
+# ============================================================
+
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=os.getenv(
+        "LOG_LEVEL",
+        "INFO",
+    ),
+    format=(
+        "%(asctime)s "
+        "%(levelname)s "
+        "%(name)s: "
+        "%(message)s"
+    ),
 )
 
 log = logging.getLogger(__name__)
 
+
+# ============================================================
+# بخش 3 — بارگذاری تنظیمات
+# ============================================================
+
 settings = load_settings()
-db = Database(settings.database_path)
+
+db = Database(
+    settings.database_path
+)
+
+# اگر ربات قبلاً در وسط پردازش Restart شده باشد،
+# موضوعات processing دوباره pending می‌شوند.
 db.reset_processing()
 
+# اتصال به Gemini
 ai = AIService()
 
-JOB_NAME = "hourly_topic_publisher"
 
+# ============================================================
+# بخش 4 — نام Job اتوماسیون
+# ============================================================
+
+JOB_NAME = "topic_publisher"
+
+
+# ============================================================
+# بخش 5 — بررسی دسترسی ادمین
+# ============================================================
 
 def ok(uid):
-    return not settings.admin_user_ids or uid in settings.admin_user_ids
+    """
+    اگر ADMIN_USER_IDS خالی باشد،
+    دسترسی برای همه مجاز است.
 
+    در حالت عادی بهتر است ADMIN_USER_IDS
+    در Render تنظیم شده باشد.
+    """
+
+    return (
+        not settings.admin_user_ids
+        or uid in settings.admin_user_ids
+    )
+
+
+# ============================================================
+# بخش 6 — مخفی کردن Secretها از خطاها
+# ============================================================
 
 def safe_error_text(exc):
+    """
+    جلوگیری از نمایش API Key یا Bot Token
+    داخل پیام‌های خطا.
+    """
+
     msg = str(exc)
 
-    for secret in (
+    secrets = (
         settings.gemini_api_key,
         settings.telegram_bot_token,
-    ):
+    )
+
+    for secret in secrets:
+
         if secret:
-            msg = msg.replace(secret, "[SECRET_HIDDEN]")
+            msg = msg.replace(
+                secret,
+                "[SECRET_HIDDEN]",
+            )
 
     if len(msg) > 1800:
         msg = msg[:1800] + "\n…"
@@ -47,63 +129,105 @@ def safe_error_text(exc):
     return msg
 
 
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if u.effective_user and ok(u.effective_user.id):
-        await u.message.reply_text(
-            "سلام! 🤖\n\n"
-            "سیستم انتشار زنجیره‌ای آماده است.\n\n"
-            "/starttopic موضوع اصلی ← شروع زنجیره\n"
-            "/autostatus ← وضعیت انتشار خودکار\n"
-            "/stopauto ← توقف انتشار خودکار\n"
-            "/status ← وضعیت تنظیمات\n"
-            "/newpost موضوع ← ساخت یک پست دستی\n"
-            "/admin ← پنل مدیریت\n\n"
-            "بعد از شروع، پست اول ساخته و منتشر می‌شود و سپس هر ساعت "
-            "یک موضوع فرعی از زنجیره انتخاب و منتشر می‌شود."
+# ============================================================
+# بخش 7 — محاسبه زمان اجرای بعدی
+# ============================================================
+
+def calculate_next_run(
+    start_time,
+    interval_hours,
+):
+    """
+    زمان اجرای بعدی را بر اساس:
+
+    start_time:
+        مثلاً 09:00
+
+    interval_hours:
+        مثلاً 4
+
+    محاسبه می‌کند.
+
+    مثال:
+
+    09:00
+    13:00
+    17:00
+    21:00
+    01:00
+    ...
+    """
+
+    try:
+        hour, minute = map(
+            int,
+            start_time.split(":"),
         )
 
+        if not (
+            0 <= hour <= 23
+            and 0 <= minute <= 59
+        ):
+            raise ValueError
 
-async def help_command(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if u.effective_user and ok(u.effective_user.id):
-        await u.message.reply_text(
-            "/starttopic موضوع اصلی - شروع یک زنجیره جدید\n"
-            "/autostatus - وضعیت سیستم خودکار\n"
-            "/stopauto - توقف انتشار خودکار\n"
-            "/status - بررسی تنظیمات\n"
-            "/newpost موضوع - ساخت یک پست دستی\n"
-            "/admin - پنل مدیریت"
+    except Exception:
+        # اگر ساعت خراب بود،
+        # یک ساعت بعد را انتخاب می‌کنیم.
+        return (
+            datetime.now(timezone.utc)
+            + timedelta(hours=1)
         )
 
+    interval_hours = int(interval_hours)
 
-async def status_command(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not u.effective_user or not ok(u.effective_user.id):
-        return
+    if interval_hours < 1:
+        interval_hours = 4
 
-    webhook = bool(os.getenv("RENDER_EXTERNAL_URL"))
+    if interval_hours > 24:
+        interval_hours = 24
 
-    lines = [
-        "🔎 وضعیت ربات",
-        "",
-        f"TELEGRAM_BOT_TOKEN: "
-        f"{'تنظیم شده' if settings.telegram_bot_token else '❌ خالی'}",
-        f"TELEGRAM_CHANNEL_ID: {settings.telegram_channel_id}",
-        f"GEMINI_API_KEY: "
-        f"{'تنظیم شده' if settings.gemini_api_key else '❌ خالی'}",
-        f"🤖 مدل Gemini: {settings.gemini_model}",
-        "🚫 تولید تصویر: خاموش",
-        f"🌐 RENDER_EXTERNAL_URL: "
-        f"{'تنظیم شده' if webhook else '❌ پیدا نشد'}",
-    ]
+    now = datetime.now(timezone.utc)
 
-    await u.message.reply_text("\n".join(lines))
+    # زمان شروع امروز
+    candidate = now.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+
+    # اگر ساعت شروع گذشته باشد،
+    # از همان ساعت شروع حرکت کرده و
+    # با فاصله مشخص جلو می‌رویم.
+    while candidate <= now:
+        candidate += timedelta(
+            hours=interval_hours
+        )
+
+    return candidate
 
 
-async def publish_text(bot, text):
+# ============================================================
+# بخش 8 — انتشار مستقیم متن در کانال
+# ============================================================
+
+async def publish_text(
+    bot,
+    text,
+):
+    """
+    انتشار متن در کانال تلگرام.
+    """
+
     await bot.send_message(
         chat_id=settings.telegram_channel_id,
         text=text,
     )
 
+
+# ============================================================
+# بخش 9 — تولید + استخراج موضوع + ذخیره + انتشار
+# ============================================================
 
 async def create_and_publish(
     topic,
@@ -113,20 +237,38 @@ async def create_and_publish(
     notify_chat=None,
     context=None,
 ):
-    # 1) متن
+    """
+    چرخه کامل تولید یک پست:
+
+    1. Gemini متن را تولید می‌کند.
+    2. Gemini موضوعات فرعی را استخراج می‌کند.
+    3. پست در دیتابیس ذخیره می‌شود.
+    4. موضوعات فرعی در دیتابیس ذخیره می‌شوند.
+    5. پست در Telegram منتشر می‌شود.
+    6. وضعیت پست published می‌شود.
+    7. موضوع فعلی used می‌شود.
+    """
+
+    # ========================================================
+    # مرحله 1 — تولید متن
+    # ========================================================
+
     try:
+
         text = ai.generate_text(
             topic,
             previous_text=previous_text,
         )
 
     except Exception as exc:
+
         log.exception(
             "TEXT_GENERATION_FAILED topic=%s",
             topic,
         )
 
         if notify_chat and context:
+
             await context.bot.send_message(
                 chat_id=notify_chat,
                 text=(
@@ -138,24 +280,31 @@ async def create_and_publish(
 
         raise
 
-    # 2) استخراج شاخه‌های بعدی
+    # ========================================================
+    # مرحله 2 — استخراج موضوعات فرعی
+    # ========================================================
+
     try:
+
         children = ai.extract_topics(
             topic,
             text,
         )
 
     except Exception as exc:
+
         log.exception(
             "TOPIC_EXTRACTION_FAILED topic=%s",
             topic,
         )
 
         if notify_chat and context:
+
             await context.bot.send_message(
                 chat_id=notify_chat,
                 text=(
-                    "❌ خطا در مرحله ۲: استخراج موضوعات بعدی\n\n"
+                    "❌ خطا در مرحله ۲: "
+                    "استخراج موضوعات بعدی\n\n"
                     f"موضوع: {topic}\n"
                     f"🔴 {safe_error_text(exc)}"
                 ),
@@ -163,14 +312,20 @@ async def create_and_publish(
 
         raise
 
-    # 3) ذخیره
+    # ========================================================
+    # مرحله 3 — ذخیره در دیتابیس
+    # ========================================================
+
     try:
+
         post_id = db.create_post(
-            topic,
-            text,
-            None,
+            prompt=topic,
+            text=text,
+            image_path=None,
         )
 
+        # اگر این پست از یک موضوع فرعی ساخته شده،
+        # همان node والد آن است.
         node_id = parent_node_id
 
         db.add_topics(
@@ -181,12 +336,14 @@ async def create_and_publish(
         )
 
     except Exception as exc:
+
         log.exception(
             "DATABASE_FAILED topic=%s",
             topic,
         )
 
         if notify_chat and context:
+
             await context.bot.send_message(
                 chat_id=notify_chat,
                 text=(
@@ -198,34 +355,50 @@ async def create_and_publish(
 
         raise
 
-    # 4) انتشار
+    # ========================================================
+    # مرحله 4 — انتشار در Telegram
+    # ========================================================
+
     try:
+
         await publish_text(
             context.bot,
             text,
         )
 
+        # تغییر وضعیت پست به published
         db.update_post(
             post_id,
             "published",
         )
 
-        db.set_last_post(post_id)
+        # ذخیره آخرین پست در automation
+        db.set_last_post(
+            post_id
+        )
 
+        # اگر این پست مربوط به یک موضوع فرعی بوده،
+        # موضوع فعلی استفاده‌شده محسوب می‌شود.
         if parent_node_id:
-            db.mark_topic_used(parent_node_id)
+
+            db.mark_topic_used(
+                parent_node_id
+            )
 
     except Exception as exc:
+
         log.exception(
             "PUBLISH_FAILED topic=%s",
             topic,
         )
 
         if notify_chat and context:
+
             await context.bot.send_message(
                 chat_id=notify_chat,
                 text=(
-                    "❌ خطا در مرحله ۴: انتشار در کانال\n\n"
+                    "❌ خطا در مرحله ۴: "
+                    "انتشار در کانال\n\n"
                     f"موضوع: {topic}\n"
                     f"🔴 {safe_error_text(exc)}"
                 ),
@@ -236,26 +409,184 @@ async def create_and_publish(
     return post_id, children
 
 
+# ============================================================
+# بخش 10 — دستور /start
+# ============================================================
+
+async def start(
+    u: Update,
+    c: ContextTypes.DEFAULT_TYPE,
+):
+
+    if (
+        not u.effective_user
+        or not ok(u.effective_user.id)
+    ):
+        return
+
+    await u.message.reply_text(
+        "سلام! 🤖\n\n"
+        "سیستم تولید و انتشار محتوای هوشمند آماده است.\n\n"
+        "📌 دستورات اصلی:\n\n"
+        "/starttopic موضوع اصلی\n"
+        "شروع یک زنجیره جدید\n\n"
+        "/newpost موضوع\n"
+        "ساخت و انتشار یک پست دستی\n\n"
+        "/autostatus\n"
+        "وضعیت اتوماسیون\n\n"
+        "/stopauto\n"
+        "توقف انتشار خودکار\n\n"
+        "/status\n"
+        "وضعیت سیستم\n\n"
+        "/admin\n"
+        "پنل مدیریت"
+    )
+
+
+# ============================================================
+# بخش 11 — دستور /help
+# ============================================================
+
+async def help_command(
+    u: Update,
+    c: ContextTypes.DEFAULT_TYPE,
+):
+
+    if (
+        not u.effective_user
+        or not ok(u.effective_user.id)
+    ):
+        return
+
+    await u.message.reply_text(
+        "📚 راهنمای ربات\n\n"
+
+        "/starttopic موضوع\n"
+        "شروع یک زنجیره جدید.\n\n"
+
+        "/newpost موضوع\n"
+        "تولید و انتشار یک پست مستقل.\n\n"
+
+        "/autostatus\n"
+        "نمایش وضعیت اتوماسیون.\n\n"
+
+        "/stopauto\n"
+        "توقف اتوماسیون.\n\n"
+
+        "/status\n"
+        "نمایش وضعیت Gemini، Telegram و Render.\n\n"
+
+        "/admin\n"
+        "ورود به پنل مدیریت."
+    )
+
+
+# ============================================================
+# بخش 12 — دستور /status
+# ============================================================
+
+async def status_command(
+    u: Update,
+    c: ContextTypes.DEFAULT_TYPE,
+):
+
+    if (
+        not u.effective_user
+        or not ok(u.effective_user.id)
+    ):
+        return
+
+    webhook = bool(
+        os.getenv(
+            "RENDER_EXTERNAL_URL"
+        )
+    )
+
+    state = db.get_automation()
+
+    automation_active = bool(
+        state and state[0]
+    )
+
+    lines = [
+        "🔎 وضعیت ربات",
+        "",
+        "📱 Telegram",
+        (
+            "TELEGRAM_BOT_TOKEN: "
+            f"{'تنظیم شده' if settings.telegram_bot_token else '❌ خالی'}"
+        ),
+        (
+            "TELEGRAM_CHANNEL_ID: "
+            f"{settings.telegram_channel_id}"
+        ),
+        "",
+        "🤖 Gemini",
+        (
+            "GEMINI_API_KEY: "
+            f"{'تنظیم شده' if settings.gemini_api_key else '❌ خالی'}"
+        ),
+        (
+            f"مدل: {settings.gemini_model}"
+        ),
+        "",
+        "⚙️ Automation",
+        (
+            "وضعیت: "
+            f"{'🟢 فعال' if automation_active else '🔴 خاموش'}"
+        ),
+        "",
+        "🖼 تولید تصویر: خاموش",
+        (
+            "🌐 RENDER_EXTERNAL_URL: "
+            f"{'تنظیم شده' if webhook else '❌ پیدا نشد'}"
+        ),
+    ]
+
+    await u.message.reply_text(
+        "\n".join(lines)
+    )
+
+
+# ============================================================
+# بخش 13 — شروع زنجیره جدید
+# ============================================================
+
 async def start_topic(
     u: Update,
     c: ContextTypes.DEFAULT_TYPE,
 ):
-    if not u.effective_user or not ok(u.effective_user.id):
+
+    if (
+        not u.effective_user
+        or not ok(u.effective_user.id)
+    ):
         return
 
-    topic = " ".join(c.args).strip()
+    topic = " ".join(
+        c.args
+    ).strip()
 
     if not topic:
+
         await u.message.reply_text(
-            "مثال:\n/starttopic گوشی سامسونگ Galaxy S24"
+            "مثال:\n"
+            "/starttopic گوشی سامسونگ Galaxy S24"
         )
+
         return
 
     try:
+
+        # اتوماسیون قبلی متوقف می‌شود.
         db.stop_automation()
+
+        # موضوعات processing قدیمی آزاد می‌شوند.
         db.reset_processing()
 
-        now = datetime.now(timezone.utc)
+        # -----------------------------------------------
+        # تولید و انتشار پست اول
+        # -----------------------------------------------
 
         post_id, children = await create_and_publish(
             topic=topic,
@@ -266,87 +597,218 @@ async def start_topic(
             context=c,
         )
 
-        next_run = now + timedelta(hours=1)
+        # -----------------------------------------------
+        # دریافت تنظیمات فعلی اتوماسیون
+        # -----------------------------------------------
+
+        state = db.get_automation()
+
+        start_time = (
+            state[4]
+            if state and state[4]
+            else "09:00"
+        )
+
+        interval_hours = (
+            state[5]
+            if state and state[5]
+            else 4
+        )
+
+        # -----------------------------------------------
+        # محاسبه اجرای بعدی
+        # -----------------------------------------------
+
+        next_run = calculate_next_run(
+            start_time,
+            interval_hours,
+        )
+
+        # -----------------------------------------------
+        # ذخیره تنظیمات اتوماسیون
+        # -----------------------------------------------
 
         db.start_automation(
-            topic,
-            next_run.isoformat(),
+            root_topic=topic,
+            next_run_at=next_run.isoformat(),
+            start_time=start_time,
+            interval_hours=interval_hours,
         )
 
-        schedule_hourly(c.application)
+        # -----------------------------------------------
+        # فعال کردن Scheduler
+        # -----------------------------------------------
+
+        schedule_automation(
+            c.application
+        )
 
         await u.message.reply_text(
-            f"✅ زنجیره شروع شد.\n\n"
-            f"موضوع اصلی: {topic}\n"
-            f"پست اول: #{post_id} منتشر شد.\n"
-            f"موضوعات بعدی آماده: {len(children)}\n"
-            f"⏰ پست بعدی حدود یک ساعت دیگر منتشر می‌شود.\n\n"
-            f"از اینجا به بعد دخالت تو لازم نیست."
+            "✅ زنجیره با موفقیت شروع شد.\n\n"
+
+            f"📌 موضوع اصلی:\n{topic}\n\n"
+
+            f"📝 پست اول: #{post_id}\n"
+            "📤 منتشر شد.\n\n"
+
+            f"🌱 موضوعات فرعی ساخته‌شده: "
+            f"{len(children)}\n\n"
+
+            f"🕐 ساعت شروع: {start_time}\n"
+            f"⏱ فاصله انتشار: "
+            f"هر {interval_hours} ساعت\n\n"
+
+            f"📅 اجرای بعدی:\n"
+            f"{next_run.isoformat()}\n\n"
+
+            "🤖 از اینجا به بعد انتشار خودکار انجام می‌شود."
         )
 
-    except Exception:
-        return
+    except Exception as exc:
 
+        log.exception(
+            "START_TOPIC_FAILED topic=%s",
+            topic,
+        )
+
+        # خطا قبلاً ممکن است برای کاربر ارسال شده باشد،
+        # ولی اینجا یک پیام کلی هم می‌فرستیم.
+        try:
+
+            await u.message.reply_text(
+                "❌ شروع زنجیره انجام نشد.\n\n"
+                f"{safe_error_text(exc)}"
+            )
+
+        except Exception:
+            log.exception(
+                "START_TOPIC_ERROR_MESSAGE_FAILED"
+            )
+
+
+# ============================================================
+# بخش 14 — ساخت پست دستی
+# ============================================================
 
 async def new_post(
     u: Update,
     c: ContextTypes.DEFAULT_TYPE,
 ):
-    if not u.effective_user or not ok(u.effective_user.id):
+
+    if (
+        not u.effective_user
+        or not ok(u.effective_user.id)
+    ):
         return
 
-    topic = " ".join(c.args).strip()
+    topic = " ".join(
+        c.args
+    ).strip()
 
     if not topic:
+
         await u.message.reply_text(
-            "مثال: /newpost درباره هوش مصنوعی"
+            "مثال:\n"
+            "/newpost درباره هوش مصنوعی"
         )
+
         return
 
     try:
+
+        previous_text = (
+            db.get_last_post_text()
+        )
+
         post_id, children = await create_and_publish(
             topic=topic,
-            previous_text=db.get_last_post_text(),
+            previous_text=previous_text,
+            parent_node_id=None,
+            depth=0,
             notify_chat=u.effective_chat.id,
             context=c,
         )
 
         await u.message.reply_text(
-            f"✅ پست #{post_id} منتشر شد.\n"
-            f"🌱 {len(children)} موضوع فرعی جدید به زنجیره اضافه شد."
+            "✅ پست منتشر شد.\n\n"
+            f"📝 شماره پست: #{post_id}\n"
+            f"🌱 موضوعات فرعی جدید: {len(children)}"
         )
 
-    except Exception:
-        return
+    except Exception as exc:
+
+        log.exception(
+            "MANUAL_POST_FAILED topic=%s",
+            topic,
+        )
+
+        try:
+
+            await u.message.reply_text(
+                "❌ ساخت پست انجام نشد.\n\n"
+                f"{safe_error_text(exc)}"
+            )
+
+        except Exception:
+            log.exception(
+                "MANUAL_POST_ERROR_MESSAGE_FAILED"
+            )
 
 
-async def hourly_job(
+# ============================================================
+# بخش 15 — اجرای یک پست خودکار
+# ============================================================
+
+async def automation_job(
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     state = db.get_automation()
 
+    # اگر اتوماسیون خاموش است،
+    # هیچ کاری انجام نمی‌دهیم.
     if not state or not state[0]:
         return
+
+    # -----------------------------------------------
+    # گرفتن موضوع بعدی
+    # -----------------------------------------------
 
     claimed = db.claim_next_topic()
 
     if not claimed:
+
         await context.bot.send_message(
             chat_id=settings.telegram_channel_id,
             text=(
-                "ℹ️ زنجیره موضوعات فعلاً تمام شده است. "
-                "برای شروع موضوع جدید از /starttopic استفاده کنید."
+                "ℹ️ زنجیره موضوعات فعلاً تمام شده است.\n\n"
+                "برای شروع موضوع جدید از:\n"
+                "/starttopic موضوع\n"
+                "استفاده کنید."
             ),
         )
 
         db.stop_automation()
+
+        # Scheduler هم متوقف می‌شود.
+        remove_automation_jobs(
+            context.application
+        )
+
         return
 
     node_id, topic, parent_id, depth = claimed
 
-    previous_text = db.get_last_post_text()
+    previous_text = (
+        db.get_last_post_text()
+    )
 
     try:
+
+        # -------------------------------------------
+        # تولید و انتشار
+        # -------------------------------------------
+
         post_id, children = await create_and_publish(
             topic=topic,
             previous_text=previous_text,
@@ -356,9 +818,30 @@ async def hourly_job(
             context=context,
         )
 
+        # -------------------------------------------
+        # تنظیم زمان بعدی
+        # -------------------------------------------
+
+        current_state = db.get_automation()
+
+        start_time = (
+            current_state[4]
+            if current_state and current_state[4]
+            else "09:00"
+        )
+
+        interval_hours = (
+            current_state[5]
+            if current_state and current_state[5]
+            else 4
+        )
+
+        # اجرای بعدی بر اساس فاصله تنظیم‌شده
         next_run = (
             datetime.now(timezone.utc)
-            + timedelta(hours=1)
+            + timedelta(
+                hours=int(interval_hours)
+            )
         )
 
         db.set_next_run(
@@ -366,29 +849,36 @@ async def hourly_job(
         )
 
         log.info(
-            "AUTO_POST_PUBLISHED post=%s topic=%s children=%s next=%s",
+            "AUTO_POST_PUBLISHED "
+            "post=%s topic=%s children=%s "
+            "next=%s start=%s interval=%s",
             post_id,
             topic,
             len(children),
             next_run.isoformat(),
+            start_time,
+            interval_hours,
         )
 
     except Exception as exc:
+
         log.exception(
-            "HOURLY_JOB_FAILED topic=%s",
+            "AUTOMATION_JOB_FAILED topic=%s",
             topic,
         )
 
         try:
+
+            # موضوع processing دوباره pending می‌شود.
             db.reset_processing()
 
             await context.bot.send_message(
                 chat_id=settings.telegram_channel_id,
                 text=(
-                    "⚠️ انتشار خودکار این ساعت ناموفق بود.\n"
+                    "⚠️ انتشار خودکار ناموفق بود.\n\n"
                     f"موضوع: {topic}\n"
-                    f"خطا: {safe_error_text(exc)}\n\n"
-                    "این موضوع حذف نشده و در اجرای بعدی دوباره تلاش می‌شود."
+                    f"🔴 خطا: {safe_error_text(exc)}\n\n"
+                    "موضوع حذف نشده و دوباره قابل پردازش است."
                 ),
             )
 
@@ -398,149 +888,4 @@ async def hourly_job(
             )
 
 
-def schedule_hourly(application):
-    jobs = application.job_queue.get_jobs_by_name(
-        JOB_NAME
-    )
-
-    for job in jobs:
-        job.schedule_removal()
-
-    application.job_queue.run_repeating(
-        hourly_job,
-        interval=3600,
-        first=3600,
-        name=JOB_NAME,
-    )
-
-
-async def autostatus(
-    u: Update,
-    c: ContextTypes.DEFAULT_TYPE,
-):
-    if not u.effective_user or not ok(u.effective_user.id):
-        return
-
-    state = db.get_automation()
-    posts, pending, used = db.stats()
-
-    active = bool(state and state[0])
-    next_run = state[3] if state else None
-
-    await u.message.reply_text(
-        "🤖 وضعیت انتشار خودکار\n\n"
-        f"فعال: {'✅ بله' if active else '❌ خیر'}\n"
-        f"پست‌های منتشرشده: {posts}\n"
-        f"موضوعات منتظر: {pending}\n"
-        f"موضوعات مصرف‌شده: {used}\n"
-        f"پست بعدی: {next_run or '---'}\n\n"
-        "فاصله انتشار: هر ۱ ساعت"
-    )
-
-
-async def stop_auto(
-    u: Update,
-    c: ContextTypes.DEFAULT_TYPE,
-):
-    if not u.effective_user or not ok(u.effective_user.id):
-        return
-
-    db.stop_automation()
-
-    for job in c.application.job_queue.get_jobs_by_name(
-        JOB_NAME
-    ):
-        job.schedule_removal()
-
-    await u.message.reply_text(
-        "🛑 انتشار خودکار متوقف شد. "
-        "زنجیره در دیتابیس باقی می‌ماند."
-    )
-
-
-async def post_init(
-    application,
-):
-    state = db.get_automation()
-
-    if state and state[0]:
-        schedule_hourly(application)
-
-        log.info(
-            "HOURLY_AUTOMATION_RESTORED next_run_at=%s",
-            state[3],
-        )
-
-
-def main():
-    url = os.getenv(
-        "RENDER_EXTERNAL_URL",
-        "",
-    ).rstrip("/")
-
-    if not url:
-        raise RuntimeError(
-            "RENDER_EXTERNAL_URL تنظیم نشده است؛ "
-            "این متغیر برای Webhook لازم است."
-        )
-
-    app = (
-        Application.builder()
-        .token(settings.telegram_bot_token)
-        .post_init(post_init)
-        .build()
-    )
-
-    # اطلاعات مشترک برای پنل ادمین
-    app.bot_data["settings"] = settings
-    app.bot_data["ai"] = ai
-    app.bot_data["db"] = db
-
-    app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        CommandHandler("help", help_command)
-    )
-
-    app.add_handler(
-        CommandHandler("status", status_command)
-    )
-
-    app.add_handler(
-        CommandHandler("starttopic", start_topic)
-    )
-
-    app.add_handler(
-        CommandHandler("autostatus", autostatus)
-    )
-
-    app.add_handler(
-        CommandHandler("stopauto", stop_auto)
-    )
-
-    app.add_handler(
-        CommandHandler("newpost", new_post)
-    )
-
-    # پنل مدیریت
-    register_admin_handlers(app)
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(
-            os.getenv(
-                "PORT",
-                "10000",
-            )
-        ),
-        url_path="telegram",
-        webhook_url=f"{url}/telegram",
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
-    )
-
-
-if __name__ == "__main__":
-    main()
+# ==
