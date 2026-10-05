@@ -1,645 +1,508 @@
-import os
-import re
+import logging
 import time
-from typing import Optional
 
 from google import genai
 from google.genai import types
 
 
+logger = logging.getLogger("telegram-content-bot.ai")
+
+
 class AIServiceError(RuntimeError):
-    """Custom error for AI service."""
+    """خطای مربوط به سرویس Gemini."""
 
 
 class AIService:
-    DEFAULT_MODEL = "gemini-3.6-flash"
-    DEFAULT_MAX_RETRIES = 3
-
     def __init__(
         self,
-        key: Optional[str] = None,
-        text_model: Optional[str] = None,
-        max_retries: int = 3,
+        key: str,
+        text_model: str,
     ):
-        self.api_key = (
-            key or os.getenv("GEMINI_API_KEY", "")
-        ).strip()
-
-        self.text_model = (
-            text_model
-            or os.getenv(
-                "GEMINI_MODEL",
-                self.DEFAULT_MODEL,
-            )
-        ).strip()
-
-        self.max_retries = max(1, int(max_retries))
-
-        if not self.api_key:
+        if not key:
             raise AIServiceError(
                 "GEMINI_API_KEY تنظیم نشده است."
             )
 
+        if not text_model:
+            raise AIServiceError(
+                "GEMINI_MODEL تنظیم نشده است."
+            )
+
+        self.key = key
+        self.text_model = text_model
+
         try:
             self.client = genai.Client(
-                api_key=self.api_key
+                api_key=self.key
             )
         except Exception as exc:
             raise AIServiceError(
-                f"ساخت Gemini Client ناموفق بود: {exc}"
+                "ساخت Gemini client ناموفق بود: "
+                f"{exc}"
             ) from exc
 
-    # --------------------------------------------------
-    # Helpers
-    # --------------------------------------------------
+    def _extract_text(self, response):
+        """
+        استخراج امن متن از پاسخ Gemini.
+        """
 
-    @staticmethod
-    def _clean_text(text: Optional[str]) -> str:
-        if not text:
+        if response is None:
             return ""
 
-        text = str(text).strip()
-
-        # Remove accidental markdown code fences
-        text = re.sub(
-            r"^```(?:text|markdown)?\s*",
-            "",
-            text,
-            flags=re.IGNORECASE,
+        text = getattr(
+            response,
+            "text",
+            None,
         )
 
-        text = re.sub(
-            r"\s*```$",
-            "",
-            text,
+        if text:
+            return text.strip()
+
+        candidates = getattr(
+            response,
+            "candidates",
+            None,
         )
 
-        return text.strip()
+        if not candidates:
+            return ""
 
-    @staticmethod
-    def _is_retryable_error(exc: Exception) -> bool:
-        error_text = (
-            f"{type(exc).__name__}: {exc}"
-        ).upper()
+        parts = []
 
-        retryable_errors = (
-            "429",
-            "RESOURCE_EXHAUSTED",
-            "RATE_LIMIT",
-            "503",
-            "UNAVAILABLE",
-            "SERVICE_UNAVAILABLE",
-            "500",
-            "INTERNAL",
-            "TIMEOUT",
-            "DEADLINE",
-        )
+        for candidate in candidates:
+            content = getattr(
+                candidate,
+                "content",
+                None,
+            )
 
-        return any(
-            item in error_text
-            for item in retryable_errors
-        )
+            if not content:
+                continue
 
-    @staticmethod
-    def _retry_delay(
-        attempt: int,
-        exc: Exception,
-    ) -> int:
-        error_text = str(exc).upper()
+            content_parts = getattr(
+                content,
+                "parts",
+                None,
+            )
 
-        if (
-            "429" in error_text
-            or "RESOURCE_EXHAUSTED" in error_text
-            or "RATE_LIMIT" in error_text
-        ):
-            return min(30, 5 * (2 ** attempt))
+            if not content_parts:
+                continue
 
-        return min(20, 2 * (2 ** attempt))
+            for part in content_parts:
+                part_text = getattr(
+                    part,
+                    "text",
+                    None,
+                )
 
-    # --------------------------------------------------
-    # Gemini API
-    # --------------------------------------------------
+                if part_text:
+                    parts.append(
+                        part_text.strip()
+                    )
+
+        return "\n".join(
+            part for part in parts if part
+        ).strip()
 
     def _call(
         self,
         prompt: str,
         temperature: float = 0.8,
-        max_output_tokens: int = 4096,
-    ) -> str:
-
+        max_output_tokens: int = 2048,
+        retries: int = 3,
+    ):
         if not prompt or not prompt.strip():
             raise AIServiceError(
-                "Prompt نمی‌تواند خالی باشد."
+                "Prompt خالی است."
             )
 
         last_error = None
 
-        for attempt in range(self.max_retries):
+        for attempt in range(1, retries + 1):
             try:
-                response = (
-                    self.client.models.generate_content(
-                        model=self.text_model,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=temperature,
-                            max_output_tokens=max_output_tokens,
-                        ),
-                    )
+                logger.info(
+                    "Gemini request | model=%s | attempt=%s/%s",
+                    self.text_model,
+                    attempt,
+                    retries,
                 )
 
-                text = self._clean_text(
-                    getattr(response, "text", None)
+                response = self.client.models.generate_content(
+                    model=self.text_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                    ),
                 )
 
-                if not text:
-                    raise RuntimeError(
-                        "Gemini پاسخ متنی خالی برگرداند."
+                text = self._extract_text(
+                    response
+                )
+
+                if text:
+                    return text
+
+                finish_reason = None
+
+                try:
+                    candidates = getattr(
+                        response,
+                        "candidates",
+                        None,
                     )
 
-                return text
+                    if candidates:
+                        finish_reason = getattr(
+                            candidates[0],
+                            "finish_reason",
+                            None,
+                        )
+                except Exception:
+                    pass
+
+                logger.warning(
+                    "Gemini returned empty text | "
+                    "finish_reason=%s",
+                    finish_reason,
+                )
+
+                last_error = RuntimeError(
+                    "Gemini پاسخ متنی خالی برگرداند."
+                )
 
             except Exception as exc:
                 last_error = exc
 
-                is_last_attempt = (
-                    attempt >= self.max_retries - 1
+                error_text = str(exc)
+
+                logger.exception(
+                    "Gemini request failed | "
+                    "model=%s | attempt=%s/%s | error=%s",
+                    self.text_model,
+                    attempt,
+                    retries,
+                    error_text,
                 )
 
-                if (
-                    is_last_attempt
-                    or not self._is_retryable_error(exc)
-                ):
+                retryable = any(
+                    code in error_text
+                    for code in (
+                        "429",
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "RESOURCE_EXHAUSTED",
+                        "UNAVAILABLE",
+                    )
+                )
+
+                if not retryable:
                     break
 
-                delay = self._retry_delay(
-                    attempt,
-                    exc,
+            if attempt < retries:
+                time.sleep(
+                    2 ** (attempt - 1)
                 )
-
-                time.sleep(delay)
 
         raise AIServiceError(
             "Gemini API خطا داد | "
             f"مدل: {self.text_model} | "
-            f"{type(last_error).__name__}: "
             f"{last_error}"
         ) from last_error
 
-    # --------------------------------------------------
-    # Test connection
-    # --------------------------------------------------
+    def test_connection(self):
+        """
+        تست ساده اتصال به Gemini.
+        """
 
-    def test_connection(self) -> str:
-        return self._call(
-            "فقط کلمه OK را پاسخ بده.",
+        text = self._call(
+            prompt=(
+                "Reply with exactly one short word: "
+                "OK"
+            ),
             temperature=0,
-            max_output_tokens=10,
+            max_output_tokens=20,
+            retries=2,
         )
 
-    # --------------------------------------------------
-    # Generate text
-    # --------------------------------------------------
+        if not text:
+            raise AIServiceError(
+                "Gemini پاسخ خالی برگرداند."
+            )
+
+        logger.info(
+            "Gemini connection test successful."
+        )
+
+        return text
 
     def generate_text(
         self,
         topic: str,
-        previous_text: Optional[str] = None,
-        research: Optional[str] = None,
-        style_instruction: Optional[str] = None,
-    ) -> str:
-
+        previous_text: str | None = None,
+        research: str | None = None,
+        style_instruction: str | None = None,
+    ):
         if not topic or not topic.strip():
             raise AIServiceError(
-                "موضوع پست نمی‌تواند خالی باشد."
+                "موضوع محتوا خالی است."
             )
 
-        context_parts = []
+        prompt_parts = [
+            "تو یک نویسنده حرفه‌ای فارسی برای یک کانال "
+            "تلگرامی هستی.",
+            "",
+            "برای موضوع زیر یک پست باکیفیت، دقیق، "
+            "خواندنی و طبیعی به زبان فارسی تولید کن.",
+            "",
+            f"موضوع:",
+            topic.strip(),
+        ]
 
-        if previous_text:
-            context_parts.append(
-                """
-پست قبلی:
-
----
-%s
----
-
-پست جدید نباید تکرار، کپی یا بازنویسی سطحی آن باشد.
-"""
-                % previous_text.strip()
+        if style_instruction:
+            prompt_parts.extend(
+                [
+                    "",
+                    "دستور سبک:",
+                    style_instruction.strip(),
+                ]
             )
 
         if research:
-            context_parts.append(
-                """
-اطلاعات تحقیقاتی:
-
----
-%s
----
-
-فقط از اطلاعات قابل اتکا استفاده کن.
-"""
-                % research.strip()
+            prompt_parts.extend(
+                [
+                    "",
+                    "اطلاعات تحقیقاتی:",
+                    research.strip(),
+                ]
             )
 
-        if style_instruction:
-            context_parts.append(
-                """
-دستور سبک:
-
-%s
-"""
-                % style_instruction.strip()
+        if previous_text:
+            prompt_parts.extend(
+                [
+                    "",
+                    "پست قبلی برای جلوگیری از تکرار:",
+                    previous_text.strip(),
+                ]
             )
 
-        context = "\n".join(context_parts)
-
-        prompt = """
-برای کانال تلگرامی فارسی @nova_ip
-درباره موضوع زیر یک پست حرفه‌ای، جذاب و خلاقانه بنویس.
-
-موضوع:
-%s
-
-%s
-
-قوانین:
-
-- فارسی روان، طبیعی و انسانی بنویس.
-- لحن دوستانه، صمیمی و حرفه‌ای باشد.
-- با یک قلاب قوی شروع کن.
-- متن مفید و نسبتاً کامل باشد.
-- پاراگراف‌بندی خوانا داشته باشد.
-- ایموجی را به اندازه و طبیعی استفاده کن.
-- حتماً @nova_ip داخل متن باشد.
-- در پایان یک سؤال مشخص از مخاطب بپرس.
-- از تکرار پست قبلی خودداری کن.
-- اطلاعات ساختگی تولید نکن.
-- اگر اطلاعات کافی نیست، ادعای قطعی نساز.
-- در پایان 5 تا 10 هشتگ مرتبط قرار بده.
-- از عنوان‌های کلیشه‌ای و بیش از حد تبلیغاتی پرهیز کن.
-- فقط متن نهایی پست را برگردان.
-""" % (
-            topic.strip(),
-            context,
+        prompt_parts.extend(
+            [
+                "",
+                "قوانین:",
+                "- متن را به فارسی روان بنویس.",
+                "- از تکرار و کلیشه پرهیز کن.",
+                "- مقدمه جذاب باشد.",
+                "- ارزش واقعی به خواننده بده.",
+                "- از ادعاهای بی‌پایه و ساختن آمار جعلی خودداری کن.",
+                "- اگر موضوع فنی است، ساده و قابل‌فهم توضیح بده.",
+                "- متن را برای انتشار مستقیم در Telegram آماده کن.",
+                "- از هشتگ‌های زیاد استفاده نکن.",
+                "",
+                "فقط متن نهایی پست را خروجی بده.",
+            ]
         )
 
-        try:
-            return self._call(
-                prompt,
-                temperature=0.85,
-                max_output_tokens=4096,
-            )
-
-        except Exception as exc:
-            raise AIServiceError(
-                f"TEXT_GENERATION | {exc}"
-            ) from exc
-
-    # --------------------------------------------------
-    # Regenerate
-    # --------------------------------------------------
+        return self._call(
+            prompt="\n".join(prompt_parts),
+            temperature=0.8,
+            max_output_tokens=2048,
+            retries=3,
+        )
 
     def regenerate(
         self,
         topic: str,
         old_text: str,
-        instruction: Optional[str] = None,
-        previous_text: Optional[str] = None,
-    ) -> str:
-
-        if not old_text or not old_text.strip():
+        instruction: str | None = None,
+        previous_text: str | None = None,
+    ):
+        if not old_text:
             raise AIServiceError(
-                "متن فعلی برای بازتولید خالی است."
+                "متن قبلی برای بازتولید وجود ندارد."
             )
 
-        instruction = (
-            instruction.strip()
-            if instruction
-            else
-            "متن را جذاب‌تر، طبیعی‌تر و متفاوت‌تر کن."
-        )
+        prompt_parts = [
+            "متن زیر یک پیش‌نویس فارسی برای Telegram است.",
+            "آن را با کیفیت بالاتر بازنویسی کن.",
+            "",
+            f"موضوع: {topic}",
+            "",
+            "متن قبلی:",
+            old_text,
+        ]
 
-        previous_context = ""
+        if instruction:
+            prompt_parts.extend(
+                [
+                    "",
+                    "دستور کاربر:",
+                    instruction,
+                ]
+            )
 
         if previous_text:
-            previous_context = """
-پست قبلی برای جلوگیری از تکرار:
-
----
-%s
----
-""" % previous_text.strip()
-
-        prompt = """
-این پست را برای کانال @nova_ip بازنویسی کن.
-
-موضوع:
-%s
-
-پست فعلی:
----
-%s
----
-
-دستور بازتولید:
-%s
-
-%s
-
-قوانین:
-
-- مفهوم اصلی حفظ شود.
-- متن جدید کپی یا بازنویسی سطحی نباشد.
-- ساختار و جمله‌بندی را تغییر بده.
-- فارسی روان و انسانی باشد.
-- شروع جذاب داشته باشد.
-- مفید و خوانا باشد.
-- @nova_ip داخل متن باشد.
-- یک سؤال مشخص از مخاطب داشته باشد.
-- 5 تا 10 هشتگ مرتبط در پایان داشته باشد.
-- اطلاعات ساختگی اضافه نکن.
-- فقط متن نهایی را برگردان.
-""" % (
-            topic.strip(),
-            old_text.strip(),
-            instruction,
-            previous_context,
-        )
-
-        try:
-            return self._call(
-                prompt,
-                temperature=0.9,
-                max_output_tokens=4096,
+            prompt_parts.extend(
+                [
+                    "",
+                    "پست قبلی برای جلوگیری از تکرار:",
+                    previous_text,
+                ]
             )
 
-        except Exception as exc:
-            raise AIServiceError(
-                f"REGENERATE | {exc}"
-            ) from exc
+        prompt_parts.extend(
+            [
+                "",
+                "فقط نسخه نهایی را خروجی بده.",
+                "زبان خروجی فارسی باشد.",
+            ]
+        )
 
-    # --------------------------------------------------
-    # Edit text
-    # --------------------------------------------------
+        return self._call(
+            prompt="\n".join(prompt_parts),
+            temperature=0.85,
+            max_output_tokens=2048,
+            retries=3,
+        )
 
     def edit_text(
         self,
         topic: str,
         old_text: str,
         instruction: str,
-    ) -> str:
-
-        if not old_text or not old_text.strip():
+    ):
+        if not old_text:
             raise AIServiceError(
-                "متن برای ویرایش خالی است."
+                "متن قبلی وجود ندارد."
             )
 
-        if not instruction or not instruction.strip():
+        if not instruction:
             raise AIServiceError(
-                "دستور ویرایش نمی‌تواند خالی باشد."
+                "دستور ویرایش خالی است."
             )
 
-        prompt = """
-پست زیر را ویرایش کن.
-
-موضوع:
-%s
-
-متن:
----
-%s
----
-
-دستور ادمین:
-%s
-
-قوانین:
-
-- مفهوم اصلی حفظ شود.
-- دستور ادمین دقیقاً اعمال شود.
-- فارسی روان و طبیعی باشد.
-- اطلاعات جدید و ساختگی اضافه نکن.
-- فقط نسخه نهایی ویرایش‌شده را برگردان.
-""" % (
-            topic.strip(),
-            old_text.strip(),
-            instruction.strip(),
+        prompt = (
+            "تو یک ویراستار حرفه‌ای محتوای فارسی هستی.\n\n"
+            f"موضوع:\n{topic}\n\n"
+            f"متن فعلی:\n{old_text}\n\n"
+            f"دستور ویرایش:\n{instruction}\n\n"
+            "متن را مطابق دستور کاربر اصلاح کن.\n"
+            "معنی اصلی را حفظ کن مگر اینکه کاربر خلاف آن "
+            "را خواسته باشد.\n"
+            "خروجی فقط نسخه نهایی ویرایش‌شده باشد."
         )
 
-        try:
-            return self._call(
-                prompt,
-                temperature=0.6,
-                max_output_tokens=4096,
-            )
-
-        except Exception as exc:
-            raise AIServiceError(
-                f"EDIT | {exc}"
-            ) from exc
-
-    # --------------------------------------------------
-    # Extract topics
-    # --------------------------------------------------
+        return self._call(
+            prompt=prompt,
+            temperature=0.7,
+            max_output_tokens=2048,
+            retries=3,
+        )
 
     def extract_topics(
         self,
         topic: str,
         text: str,
         count: int = 6,
-    ) -> list[str]:
+    ):
+        if not text:
+            return []
 
-        count = max(
-            4,
-            min(int(count), 10),
+        prompt = (
+            "از متن فارسی زیر چند موضوع فرعی مستقل و "
+            "قابل تولید محتوا استخراج کن.\n\n"
+            f"موضوع اصلی:\n{topic}\n\n"
+            f"متن:\n{text}\n\n"
+            f"تعداد موضوع‌ها: {count}\n\n"
+            "قوانین:\n"
+            "- هر موضوع یک خط باشد.\n"
+            "- شماره‌گذاری نکن.\n"
+            "- موضوع‌ها تکراری نباشند.\n"
+            "- موضوع‌ها باید قابلیت تبدیل شدن به یک "
+            "پست مستقل را داشته باشند.\n"
+            "- فقط فهرست موضوع‌ها را خروجی بده."
         )
 
-        if not text or not text.strip():
-            raise AIServiceError(
-                "متن برای استخراج موضوع خالی است."
-            )
-
-        prompt = """
-از پست فارسی زیر %d موضوع فرعی قابل تبدیل
-به پست مستقل استخراج کن.
-
-موضوع فعلی:
-%s
-
-پست:
----
-%s
----
-
-قوانین:
-
-- موضوع‌ها واقعاً مرتبط باشند.
-- کوتاه و مشخص باشند.
-- تکراری نباشند.
-- خود موضوع فعلی نباشند.
-- هر خط فقط یک موضوع باشد.
-- بین 4 تا %d موضوع بده.
-- شماره‌گذاری نکن.
-- توضیح اضافه نده.
-
-فقط موضوع‌ها را خط‌به‌خط برگردان.
-""" % (
-            count,
-            topic.strip(),
-            text.strip(),
-            count,
+        result = self._call(
+            prompt=prompt,
+            temperature=0.7,
+            max_output_tokens=800,
+            retries=3,
         )
 
-        try:
-            raw = self._call(
-                prompt,
-                temperature=0.5,
-                max_output_tokens=1000,
-            )
+        topics = []
 
-            items = []
+        for line in result.splitlines():
+            cleaned = line.strip()
 
-            for line in raw.splitlines():
-                line = line.strip()
+            if not cleaned:
+                continue
 
-                if not line:
-                    continue
+            cleaned = cleaned.lstrip(
+                "-•*0123456789. )("
+            ).strip()
 
-                line = re.sub(
-                    r"^(?:[-*•]|\d+[\.\)\-:])\s*",
-                    "",
-                    line,
-                ).strip()
+            if cleaned:
+                topics.append(cleaned)
 
-                line = line.strip("`*_# ")
+        unique_topics = []
 
-                if not (4 <= len(line) <= 180):
-                    continue
+        for item in topics:
+            if item not in unique_topics:
+                unique_topics.append(item)
 
-                normalized = line.casefold()
-
-                if not any(
-                    normalized == item.casefold()
-                    for item in items
-                ):
-                    items.append(line)
-
-            if len(items) < 4:
-                raise RuntimeError(
-                    "تعداد موضوعات فرعی کمتر از ۴ است."
-                )
-
-            return items[:count]
-
-        except Exception as exc:
-            raise AIServiceError(
-                f"TOPIC_EXTRACTION | {exc}"
-            ) from exc
-
-    # --------------------------------------------------
-    # Create image prompt
-    # --------------------------------------------------
+        return unique_topics[:count]
 
     def create_image_prompt(
         self,
         topic: str,
         text: str,
-    ) -> str:
-
-        prompt = """
-Create a short, high-quality English prompt
-for generating a social-media image.
-
-Topic:
-%s
-
-Post:
-%s
-
-The image must be:
-
-- professional
-- modern
-- visually engaging
-- strongly related to the topic
-- suitable for Telegram and Instagram
-- no text
-- no logos
-- no watermark
-- clean composition
-
-Return only the English image-generation prompt.
-""" % (
-            topic.strip(),
-            text.strip(),
+    ):
+        prompt = (
+            "برای تولید یک تصویر حرفه‌ای برای پست "
+            "فارسی زیر، یک prompt انگلیسی دقیق بنویس.\n\n"
+            f"موضوع:\n{topic}\n\n"
+            f"محتوا:\n{text}\n\n"
+            "تصویر باید مدرن، حرفه‌ای، مینیمال و مناسب "
+            "شبکه‌های اجتماعی باشد.\n"
+            "از متن و نوشته داخل تصویر استفاده نکن.\n"
+            "فقط prompt انگلیسی تصویر را خروجی بده."
         )
 
-        try:
-            return self._call(
-                prompt,
-                temperature=0.7,
-                max_output_tokens=500,
-            )
-
-        except Exception as exc:
-            raise AIServiceError(
-                f"IMAGE_PROMPT | {exc}"
-            ) from exc
-
-    # --------------------------------------------------
-    # Research summary
-    # --------------------------------------------------
+        return self._call(
+            prompt=prompt,
+            temperature=0.8,
+            max_output_tokens=500,
+            retries=3,
+        )
 
     def research_summary(
         self,
         topic: str,
-        sources_text: str,
-    ) -> str:
+        sources: list[str] | None = None,
+    ):
+        source_text = ""
 
-        if not sources_text or not sources_text.strip():
-            raise AIServiceError(
-                "متن منابع تحقیقاتی خالی است."
+        if sources:
+            source_text = "\n\n".join(
+                sources
             )
 
-        prompt = """
-بر اساس منابع زیر یک خلاصه دقیق
-برای نویسنده محتوا بساز.
-
-موضوع:
-%s
-
-منابع:
----
-%s
----
-
-قوانین:
-
-- فقط اطلاعات موجود در منابع را استفاده کن.
-- ادعای بدون منبع نساز.
-- نکات مهم را استخراج کن.
-- تناقض‌ها را مشخص کن.
-- موارد نامطمئن را جدا کن.
-- اطلاعات را منظم و قابل استفاده ارائه بده.
-- خروجی برای استفاده در تولید پست باشد.
-- اگر منابع برای یک ادعا کافی نیستند، آن را قطعی بیان نکن.
-
-فقط خلاصه تحقیق را برگردان.
-""" % (
-            topic.strip(),
-            sources_text.strip(),
+        prompt = (
+            "تو یک دستیار تحقیقاتی برای تولید محتوای فارسی هستی.\n\n"
+            f"موضوع:\n{topic}\n\n"
+            f"منابع موجود:\n{source_text or 'منبعی ارائه نشده است.'}\n\n"
+            "بر اساس اطلاعات موجود یک خلاصه دقیق و "
+            "کاربردی برای نویسنده محتوا تهیه کن.\n"
+            "اگر اطلاعات کافی نیست، صریحاً بگو.\n"
+            "اطلاعات یا منبع جعلی تولید نکن."
         )
 
-        try:
-            return self._call(
-                prompt,
-                temperature=0.2,
-                max_output_tokens=3000,
-            )
-
-        except Exception as exc:
-            raise AIServiceError(
-                f"RESEARCH_SUMMARY | {exc}"
-            ) from exc
+        return self._call(
+            prompt=prompt,
+            temperature=0.4,
+            max_output_tokens=1500,
+            retries=3,
+        )
