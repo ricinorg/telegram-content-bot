@@ -1,8 +1,7 @@
 import logging
 import time
 
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 
 logger = logging.getLogger("telegram-content-bot.ai")
