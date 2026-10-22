@@ -66,8 +66,9 @@ def _env_required(name: str) -> str:
 class Settings:
     telegram_bot_token: str
     telegram_channel_id: str
-    gemini_api_key: str
-    gemini_model: str
+    deepseek_api_key: str
+    deepseek_base_url: str
+    deepseek_model: str
     admin_user_ids: Set[int]
     timezone: str
     database_path: str
@@ -85,15 +86,22 @@ def load_settings() -> Settings:
         telegram_channel_id=_env_required(
             "TELEGRAM_CHANNEL_ID"
         ),
-        gemini_api_key=_env_required(
-            "GEMINI_API_KEY"
+        deepseek_api_key=_env_required(
+            "DEEPSEEK_API_KEY"
         ),
-        gemini_model=(
+        deepseek_base_url=(
             os.getenv(
-                "GEMINI_MODEL",
-                "gemini-3.6-flash",
+                "DEEPSEEK_BASE_URL",
+                "https://cleanapis.com/v1",
             ).strip()
-            or "gemini-3.6-flash"
+            or "https://cleanapis.com/v1"
+        ),
+        deepseek_model=(
+            os.getenv(
+                "DEEPSEEK_MODEL",
+                "deepseek-v4-flash-0731",
+            ).strip()
+            or "deepseek-v4-flash-0731"
         ),
         admin_user_ids=_csv_ints(
             os.getenv("ADMIN_USER_IDS")
@@ -134,3 +142,4 @@ def load_settings() -> Settings:
             default=False,
         ),
     )
+    
