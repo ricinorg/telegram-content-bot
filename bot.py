@@ -921,9 +921,10 @@ def main():
     )
 
     logger.info(
-        "Gemini model: %s",
-        settings.gemini_model,
-    )
+    "DeepSeek model: %s",
+    settings.deepseek_model,
+)
+
 
     logger.info(
         "Approval required: %s",
