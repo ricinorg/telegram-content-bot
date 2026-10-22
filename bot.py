@@ -35,7 +35,7 @@ db = Database(settings.database_path)
 
 ai = AIService(
     key=settings.deepseek_api_key,
-    text_model=settings.gemini_model,
+    text_model=settings.deepseek_model,
 )
 
 
