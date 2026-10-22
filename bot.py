@@ -34,7 +34,7 @@ settings = load_settings()
 db = Database(settings.database_path)
 
 ai = AIService(
-    key=settings.gemini_api_key,
+    key=settings.deepseek_api_key,
     text_model=settings.gemini_model,
 )
 
