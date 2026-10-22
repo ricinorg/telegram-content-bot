@@ -8,7 +8,7 @@ logger = logging.getLogger("telegram-content-bot.ai")
 
 
 class AIServiceError(RuntimeError):
-    """خطای مربوط به سرویس Gemini."""
+    """خطای مربوط به سرویس هوش مصنوعی."""
 
 
 class AIService:
@@ -16,92 +16,68 @@ class AIService:
         self,
         key: str,
         text_model: str,
+        base_url: str = "https://cleanapis.com/v1",
     ):
-        if not key:
+        if not key or not key.strip():
             raise AIServiceError(
-                "GEMINI_API_KEY تنظیم نشده است."
+                "DEEPSEEK_API_KEY تنظیم نشده است."
             )
 
-        if not text_model:
+        if not text_model or not text_model.strip():
             raise AIServiceError(
-                "GEMINI_MODEL تنظیم نشده است."
+                "DEEPSEEK_MODEL تنظیم نشده است."
             )
 
-        self.key = key
-        self.text_model = text_model
+        if not base_url or not base_url.strip():
+            raise AIServiceError(
+                "DEEPSEEK_BASE_URL تنظیم نشده است."
+            )
+
+        self.key = key.strip()
+        self.text_model = text_model.strip()
+        self.base_url = base_url.strip().rstrip("/")
 
         try:
-            self.client = genai.Client(
-                api_key=self.key
+            self.client = OpenAI(
+                api_key=self.key,
+                base_url=self.base_url,
+                timeout=60.0,
+                max_retries=0,
             )
         except Exception as exc:
             raise AIServiceError(
-                "ساخت Gemini client ناموفق بود: "
+                "ساخت کلاینت DeepSeek/Clean APIs ناموفق بود: "
                 f"{exc}"
             ) from exc
 
-    def _extract_text(self, response):
-        """
-        استخراج امن متن از پاسخ Gemini.
-        """
-
+    def _extract_text(self, response) -> str:
+        """استخراج امن متن از پاسخ سازگار با OpenAI Chat Completions."""
         if response is None:
             return ""
 
-        text = getattr(
-            response,
-            "text",
-            None,
-        )
-
-        if text:
-            return text.strip()
-
-        candidates = getattr(
-            response,
-            "candidates",
-            None,
-        )
-
-        if not candidates:
+        choices = getattr(response, "choices", None)
+        if not choices:
             return ""
 
-        parts = []
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
 
-        for candidate in candidates:
-            content = getattr(
-                candidate,
-                "content",
-                None,
-            )
+        if isinstance(content, str):
+            return content.strip()
 
-            if not content:
-                continue
+        # برخی APIهای سازگار ممکن است content را به‌صورت فهرست برگردانند.
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_text = item.get("text")
+                else:
+                    item_text = getattr(item, "text", None)
+                if item_text:
+                    parts.append(str(item_text).strip())
+            return "\n".join(part for part in parts if part).strip()
 
-            content_parts = getattr(
-                content,
-                "parts",
-                None,
-            )
-
-            if not content_parts:
-                continue
-
-            for part in content_parts:
-                part_text = getattr(
-                    part,
-                    "text",
-                    None,
-                )
-
-                if part_text:
-                    parts.append(
-                        part_text.strip()
-                    )
-
-        return "\n".join(
-            part for part in parts if part
-        ).strip()
+        return ""
 
     def _call(
         self,
@@ -109,91 +85,79 @@ class AIService:
         temperature: float = 0.8,
         max_output_tokens: int = 2048,
         retries: int = 3,
-    ):
+    ) -> str:
         if not prompt or not prompt.strip():
-            raise AIServiceError(
-                "Prompt خالی است."
-            )
+            raise AIServiceError("Prompt خالی است.")
 
         last_error = None
+        retries = max(1, retries)
 
         for attempt in range(1, retries + 1):
             try:
                 logger.info(
-                    "Gemini request | model=%s | attempt=%s/%s",
+                    "DeepSeek request | base_url=%s | model=%s | attempt=%s/%s",
+                    self.base_url,
                     self.text_model,
                     attempt,
                     retries,
                 )
 
-                response = self.client.models.generate_content(
+                response = self.client.chat.completions.create(
                     model=self.text_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                    ),
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_output_tokens,
                 )
 
-                text = self._extract_text(
-                    response
-                )
-
+                text = self._extract_text(response)
                 if text:
                     return text
 
                 finish_reason = None
-
                 try:
-                    candidates = getattr(
-                        response,
-                        "candidates",
-                        None,
-                    )
-
-                    if candidates:
-                        finish_reason = getattr(
-                            candidates[0],
-                            "finish_reason",
-                            None,
-                        )
+                    if response.choices:
+                        finish_reason = response.choices[0].finish_reason
                 except Exception:
                     pass
 
                 logger.warning(
-                    "Gemini returned empty text | "
-                    "finish_reason=%s",
+                    "DeepSeek returned empty text | finish_reason=%s",
                     finish_reason,
                 )
-
                 last_error = RuntimeError(
-                    "Gemini پاسخ متنی خالی برگرداند."
+                    "API پاسخ متنی خالی برگرداند."
                 )
 
             except Exception as exc:
                 last_error = exc
-
                 error_text = str(exc)
-
                 logger.exception(
-                    "Gemini request failed | "
-                    "model=%s | attempt=%s/%s | error=%s",
+                    "DeepSeek request failed | model=%s | attempt=%s/%s | error=%s",
                     self.text_model,
                     attempt,
                     retries,
                     error_text,
                 )
 
+                # خطاهای موقت شبکه، محدودیت درخواست و خطاهای سمت سرور را تکرار کن.
                 retryable = any(
-                    code in error_text
-                    for code in (
+                    marker in error_text.lower()
+                    for marker in (
                         "429",
                         "500",
                         "502",
                         "503",
                         "504",
-                        "RESOURCE_EXHAUSTED",
-                        "UNAVAILABLE",
+                        "timeout",
+                        "timed out",
+                        "connection",
+                        "temporarily unavailable",
+                        "rate limit",
                     )
                 )
 
@@ -201,40 +165,28 @@ class AIService:
                     break
 
             if attempt < retries:
-                time.sleep(
-                    2 ** (attempt - 1)
-                )
+                time.sleep(2 ** (attempt - 1))
 
         raise AIServiceError(
-            "Gemini API خطا داد | "
+            "DeepSeek API خطا داد | "
+            f"آدرس: {self.base_url} | "
             f"مدل: {self.text_model} | "
             f"{last_error}"
         ) from last_error
 
     def test_connection(self):
-        """
-        تست ساده اتصال به Gemini.
-        """
-
+        """تست ساده اتصال به API."""
         text = self._call(
-            prompt=(
-                "Reply with exactly one short word: "
-                "OK"
-            ),
+            prompt="Reply with exactly one short word: OK",
             temperature=0,
             max_output_tokens=20,
             retries=2,
         )
 
         if not text:
-            raise AIServiceError(
-                "Gemini پاسخ خالی برگرداند."
-            )
+            raise AIServiceError("API پاسخ خالی برگرداند.")
 
-        logger.info(
-            "Gemini connection test successful."
-        )
-
+        logger.info("DeepSeek API connection test successful.")
         return text
 
     def generate_text(
@@ -245,46 +197,26 @@ class AIService:
         style_instruction: str | None = None,
     ):
         if not topic or not topic.strip():
-            raise AIServiceError(
-                "موضوع محتوا خالی است."
-            )
+            raise AIServiceError("موضوع محتوا خالی است.")
 
         prompt_parts = [
-            "تو یک نویسنده حرفه‌ای فارسی برای یک کانال "
-            "تلگرامی هستی.",
+            "تو یک نویسنده حرفه‌ای فارسی برای یک کانال تلگرامی هستی.",
             "",
-            "برای موضوع زیر یک پست باکیفیت، دقیق، "
-            "خواندنی و طبیعی به زبان فارسی تولید کن.",
+            "برای موضوع زیر یک پست باکیفیت، دقیق، خواندنی و طبیعی به زبان فارسی تولید کن.",
             "",
-            f"موضوع:",
+            "موضوع:",
             topic.strip(),
         ]
 
         if style_instruction:
-            prompt_parts.extend(
-                [
-                    "",
-                    "دستور سبک:",
-                    style_instruction.strip(),
-                ]
-            )
+            prompt_parts.extend(["", "دستور سبک:", style_instruction.strip()])
 
         if research:
-            prompt_parts.extend(
-                [
-                    "",
-                    "اطلاعات تحقیقاتی:",
-                    research.strip(),
-                ]
-            )
+            prompt_parts.extend(["", "اطلاعات تحقیقاتی:", research.strip()])
 
         if previous_text:
             prompt_parts.extend(
-                [
-                    "",
-                    "پست قبلی برای جلوگیری از تکرار:",
-                    previous_text.strip(),
-                ]
+                ["", "پست قبلی برای جلوگیری از تکرار:", previous_text.strip()]
             )
 
         prompt_parts.extend(
@@ -319,9 +251,7 @@ class AIService:
         previous_text: str | None = None,
     ):
         if not old_text:
-            raise AIServiceError(
-                "متن قبلی برای بازتولید وجود ندارد."
-            )
+            raise AIServiceError("متن قبلی برای بازتولید وجود ندارد.")
 
         prompt_parts = [
             "متن زیر یک پیش‌نویس فارسی برای Telegram است.",
@@ -334,30 +264,14 @@ class AIService:
         ]
 
         if instruction:
-            prompt_parts.extend(
-                [
-                    "",
-                    "دستور کاربر:",
-                    instruction,
-                ]
-            )
+            prompt_parts.extend(["", "دستور کاربر:", instruction])
 
         if previous_text:
             prompt_parts.extend(
-                [
-                    "",
-                    "پست قبلی برای جلوگیری از تکرار:",
-                    previous_text,
-                ]
+                ["", "پست قبلی برای جلوگیری از تکرار:", previous_text]
             )
 
-        prompt_parts.extend(
-            [
-                "",
-                "فقط نسخه نهایی را خروجی بده.",
-                "زبان خروجی فارسی باشد.",
-            ]
-        )
+        prompt_parts.extend(["", "فقط نسخه نهایی را خروجی بده.", "زبان خروجی فارسی باشد."])
 
         return self._call(
             prompt="\n".join(prompt_parts),
@@ -373,14 +287,10 @@ class AIService:
         instruction: str,
     ):
         if not old_text:
-            raise AIServiceError(
-                "متن قبلی وجود ندارد."
-            )
+            raise AIServiceError("متن قبلی وجود ندارد.")
 
         if not instruction:
-            raise AIServiceError(
-                "دستور ویرایش خالی است."
-            )
+            raise AIServiceError("دستور ویرایش خالی است.")
 
         prompt = (
             "تو یک ویراستار حرفه‌ای محتوای فارسی هستی.\n\n"
@@ -388,8 +298,7 @@ class AIService:
             f"متن فعلی:\n{old_text}\n\n"
             f"دستور ویرایش:\n{instruction}\n\n"
             "متن را مطابق دستور کاربر اصلاح کن.\n"
-            "معنی اصلی را حفظ کن مگر اینکه کاربر خلاف آن "
-            "را خواسته باشد.\n"
+            "معنی اصلی را حفظ کن مگر اینکه کاربر خلاف آن را خواسته باشد.\n"
             "خروجی فقط نسخه نهایی ویرایش‌شده باشد."
         )
 
@@ -410,8 +319,7 @@ class AIService:
             return []
 
         prompt = (
-            "از متن فارسی زیر چند موضوع فرعی مستقل و "
-            "قابل تولید محتوا استخراج کن.\n\n"
+            "از متن فارسی زیر چند موضوع فرعی مستقل و قابل تولید محتوا استخراج کن.\n\n"
             f"موضوع اصلی:\n{topic}\n\n"
             f"متن:\n{text}\n\n"
             f"تعداد موضوع‌ها: {count}\n\n"
@@ -419,8 +327,7 @@ class AIService:
             "- هر موضوع یک خط باشد.\n"
             "- شماره‌گذاری نکن.\n"
             "- موضوع‌ها تکراری نباشند.\n"
-            "- موضوع‌ها باید قابلیت تبدیل شدن به یک "
-            "پست مستقل را داشته باشند.\n"
+            "- موضوع‌ها باید قابلیت تبدیل شدن به یک پست مستقل را داشته باشند.\n"
             "- فقط فهرست موضوع‌ها را خروجی بده."
         )
 
@@ -432,22 +339,15 @@ class AIService:
         )
 
         topics = []
-
         for line in result.splitlines():
             cleaned = line.strip()
-
             if not cleaned:
                 continue
-
-            cleaned = cleaned.lstrip(
-                "-•*0123456789. )("
-            ).strip()
-
+            cleaned = cleaned.lstrip("-•*0123456789. )(").strip()
             if cleaned:
                 topics.append(cleaned)
 
         unique_topics = []
-
         for item in topics:
             if item not in unique_topics:
                 unique_topics.append(item)
@@ -460,12 +360,10 @@ class AIService:
         text: str,
     ):
         prompt = (
-            "برای تولید یک تصویر حرفه‌ای برای پست "
-            "فارسی زیر، یک prompt انگلیسی دقیق بنویس.\n\n"
+            "برای تولید یک تصویر حرفه‌ای برای پست فارسی زیر، یک prompt انگلیسی دقیق بنویس.\n\n"
             f"موضوع:\n{topic}\n\n"
             f"محتوا:\n{text}\n\n"
-            "تصویر باید مدرن، حرفه‌ای، مینیمال و مناسب "
-            "شبکه‌های اجتماعی باشد.\n"
+            "تصویر باید مدرن، حرفه‌ای، مینیمال و مناسب شبکه‌های اجتماعی باشد.\n"
             "از متن و نوشته داخل تصویر استفاده نکن.\n"
             "فقط prompt انگلیسی تصویر را خروجی بده."
         )
@@ -482,19 +380,13 @@ class AIService:
         topic: str,
         sources: list[str] | None = None,
     ):
-        source_text = ""
-
-        if sources:
-            source_text = "\n\n".join(
-                sources
-            )
+        source_text = "\n\n".join(sources) if sources else ""
 
         prompt = (
             "تو یک دستیار تحقیقاتی برای تولید محتوای فارسی هستی.\n\n"
             f"موضوع:\n{topic}\n\n"
             f"منابع موجود:\n{source_text or 'منبعی ارائه نشده است.'}\n\n"
-            "بر اساس اطلاعات موجود یک خلاصه دقیق و "
-            "کاربردی برای نویسنده محتوا تهیه کن.\n"
+            "بر اساس اطلاعات موجود یک خلاصه دقیق و کاربردی برای نویسنده محتوا تهیه کن.\n"
             "اگر اطلاعات کافی نیست، صریحاً بگو.\n"
             "اطلاعات یا منبع جعلی تولید نکن."
         )
