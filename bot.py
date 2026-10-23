@@ -842,11 +842,15 @@ async def error_handler(
 def build_application():
     application = (
         Application.builder()
-        .token(
-            settings.telegram_bot_token
-        )
+        .token(settings.telegram_bot_token)
         .build()
     )
+
+    application.bot_data["settings"] = settings
+    application.bot_data["db"] = db
+    application.bot_data["ai"] = ai
+
+    register_admin_handlers(application)
 
     # Register admin panel callbacks before the generic post callback handler.
     register_admin_handlers(application)
